@@ -3,8 +3,7 @@ import os
 
 from wechaty import Wechaty, WechatyOptions
 
-from plugins.ddparser import DdpPlugin
-#from plugins.drama import DramaPlugin
+from plugins.drama import DramaPlugin
 from plugins.ding_dong import DingDongPlugin
 
 if __name__ == "__main__":
@@ -13,8 +12,7 @@ if __name__ == "__main__":
     )
     bot = Wechaty(options)
     bot.use([
-        #DramaPlugin(),
+        DramaPlugin(),
         DingDongPlugin(),
-        DdpPlugin()
     ])
     asyncio.run(bot.start())

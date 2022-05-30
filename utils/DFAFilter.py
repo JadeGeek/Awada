@@ -59,7 +59,7 @@ class DFAFilter():
                         res.append(char)
                         return ''.join(res)
             start += 1
-        return
+        return None
 
 
 if __name__ == "__main__":

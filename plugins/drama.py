@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import urllib3
 import time
 from typing import (
     Dict, Optional, List, Set, Tuple, Union
@@ -17,9 +18,7 @@ from wechaty import (
     WechatyPluginOptions
 )
 from wechaty_puppet import get_logger
-from antigen_bot.forward_config import Conversation, ConfigFactory
-from antigen_bot.utils import remove_at_info
-from utils import DFAFilter
+from utils.DFAFilter import DFAFilter
 
 
 class DramaPlugin(WechatyPlugin):
@@ -32,7 +31,8 @@ class DramaPlugin(WechatyPlugin):
     def __init__(
             self,
             options: Optional[WechatyPluginOptions] = None,
-            configs: str = 'drama_configs'
+            configs: str = 'drama_configs',
+            port: str = '5005'
     ) -> None:
 
         super().__init__(options)
@@ -53,47 +53,53 @@ class DramaPlugin(WechatyPlugin):
         with open(os.path.join(self.config_files, 'directors.json'), 'r', encoding='utf-8') as f:
             self.directors = json.load(f)
 
-        self.mmrules = self._load_MMrules()
-        if self.mmrule == {}:
+        self.mmrules = self._load_mmrules()
+        if self.mmrules is None:
             raise RuntimeError('Drada MMrules.xlsx not valid, pls refer to above info and try again')
 
         # 4. load self-memory data and create memory-dict for users
         self.self_memory, self.user_memory = self._load_memory()
-        if self.self_memory == {} or self.user_memory == {}:
+        if self.self_memory is None or self.user_memory is None:
             raise RuntimeError('Drada memory.xlsx not valid, pls refer to above info and try again')
 
         # 5. test the rasa nlu server and compare the intents and entries with the meta/memory data
-        self.rasa_nlu_server = 'http://localhost:5005/parse'
+        self.rasa_url = 'http://localhost:'+port+'/model/parse'
+        self.http = urllib3.PoolManager()
 
+        _test_data = {'text': '苍老师德艺双馨'}
+        _encoded_data = json.dumps(_test_data)
+        _test_res = self.http.request('POST', self.rasa_url, body=_encoded_data)
+        _result = json.loads(_test_res.data)
+
+        if not _result:
+            raise RuntimeError('Rasa server not running, pls start it first and trans the right port in str')
+
+        for intent in _result["intent_ranking"]:
+            if intent["name"] not in self.mmrules.keys():
+                self.logger.warning('Intents in the MMrules.xlsx must be the same as the intents in the rasa server')
+                raise RuntimeError('Intents in the MMrules.xlsx must be the same as the intents in the rasa server')
+
+        self.gfw = DFAFilter()
+        self.gfw.parse()
+        self.logger.info('Drada plugin init success')
 
     def _file_check(self) -> bool:
         """check the config file"""
-        if not os.path.exists(self.config_files):
-            self.logger.warning(f'config file url does not exist! {self.config_files}')
-            return False
-
-        if not os.path.isdir(self.config_files):
-            self.logger.warning(f'config file url is not a directory! {self.config_files}')
-            return False
-
-        if not os.listdir(self.config_files):
-            self.logger.warning(f'config file url is empty:!{self.config_files}')
-            return False
 
         if "directors.json" not in os.listdir(self.config_files):
-            self.logger.warning(f'config file url does not have directors.json:!{self.config_files}')
+            self.logger.warning(f'config file url:*{self.config_files}* does not have directors.json!')
             return False
 
         if "MMrules.xlsx" not in os.listdir(self.config_files):
-            self.logger.warning(f'config file url does not have MMrules.xlsx:!{self.config_files}')
+            self.logger.warning(f'config file url:*{self.config_files}* does not have MMrules.xlsx!')
             return False
 
         if "memory.xlsx" not in os.listdir(self.config_files):
-            self.logger.warning(f'config file url does not have memory.xlsx:!{self.config_files}')
+            self.logger.warning(f'config file url:*{self.config_files}* does not have memory.xlsx!')
             return False
 
         if "scenarios.xlsx" not in os.listdir(self.config_files):
-            self.logger.warning(f'config file url does not have scenarios.xlsx:!{self.config_files}')
+            self.logger.warning(f'config file url:*{self.config_files}* does not have scenarios.xlsx!')
             return False
 
     def _load_memory(self) -> dict:
@@ -104,59 +110,58 @@ class DramaPlugin(WechatyPlugin):
 
         nrows = table.nrows
         if nrows == 0:
-            self.logger.warning(f'no memory data in {memory_file},this is not allowed')
-            return {},{}
+            self.logger.warning('no data in memory.xlsx,this is not allowed')
+            return None, None
 
         self_memory = {}
         user_memory = {}
 
         for i in range(nrows):
-            k,v = table.row_values(i)
+            k, v = table.row_values(i)
             if k and v:
                 self_memory[k] = v
                 user_memory[k] = []
             else:
-                self.logger.warning(f'{k} or {v} is empty in {memory_file}')
-                return {},{}
+                self.logger.warning('No empty cell should be in the memory.xlsx, this is not allowed')
+                return None, None
 
         return self_memory, user_memory
 
-    def _load_MMrules(self) -> dict:
+    def _load_mmrules(self) -> dict:
         """load the Memory Mathmatics Rules from excel"""
-        MMrules = os.path.join(self.config_files, 'MMrules.xlsx')
-        data = xlrd.open_workbook(scenarios_file)
+        mmrules = os.path.join(self.config_files, 'MMrules.xlsx')
+        data = xlrd.open_workbook(mmrules)
         table = data.sheets()[0]
 
         nrows = table.nrows
         if nrows == 0:
-            self.logger.warning(f'no memory data in {memory_file},this is not allowed')
-            return {}
+            self.logger.warning('no memory in MMrules.xls,this is not allowed')
+            return None
 
         cols = table.ncols
 
         if table.cell_value(0,1).lower() != 'read' or table.cell_value(0,2).lower() != 'bi':
-            self.logger.warning(f'{MMrules} is not in the right format')
-            return {}
+            self.logger.warning('MMrules.xlsx is not in the right format:column 1 and 2 must be read and bi')
+            return None
 
         rules = {}
         for i in range(1, nrows):
             for k in range(cols):
                 if k == 0:
-                    if table.cell_value(i,k).isalpha():
+                    if table.cell_value(i,k):
                         intent = table.cell_value(i,k)
                         rules[intent] = {}
                     else:
-                        self.logger.warning(f'{MMrules} is not in the right format')
-                        return {}
+                        self.logger.warning('MMrules.xlsx is not in the right format: intent is empty')
+                        return None
                     continue
                 if table.cell_value(i,k).lower() not in ['yes','no']:
-                    self.logger.warning(f'{MMrules} is not in the right format')
-                    return {}
+                    self.logger.warning('MMrules.xlsx is not in the right format: value is not yes or no')
+                    return None
                 else:
                     rules[intent][table.cell_value(0,k).lower()] = table.cell_value(i,k).lower()
 
         return rules
-
 
     def _load_scenarios(self, scenario:str) -> dict:
         """load the scenarios data as assigned"""
@@ -166,15 +171,15 @@ class DramaPlugin(WechatyPlugin):
 
         nrows = table.nrows
         if nrows == 0:
-            self.logger.warning(f'no memory data in {memory_file},this is not allowed')
-            return {}
+            self.logger.warning('no data in scenario.xlsx,this is not allowed')
+            return None
 
         cols = table.ncols
 
         for k in range(1, cols):
             if not table.cell_value(0,k):
-                self.logger.warning(f'{k}th column is empty in {scenarios_file},this is not allowed')
-                return {}
+                self.logger.warning('cell of the first row is empty in scenario.xlsx,this is not allowed')
+                return None
 
         rules = {}
         for i in range(1, nrows):
@@ -184,54 +189,25 @@ class DramaPlugin(WechatyPlugin):
                         rule = table.cell_value(i,k)
                         rules[rule] = {}
                     else:
-                        self.logger.warning(f'cell({k},{v}) is empty in {memory_file},this is not allowed')
-                        return {}
+                        self.logger.warning('cell of the first column is empty in scenario.xlsx,this is not allowed')
+                        return None
                     continue
                 rules[rule][table.cell_value(0,k)] = table.cell_value(i,k)
 
         return rules
 
 
-    async def director_message(self, msg: Message, conversation_id: str):
+    async def director_message(self, msg: Message):
         """forward the message to the target conversations
         Args:
             msg (Message): the message to forward
-            conversation_id (str): the id of conversation
         """
         # 1. get the type of message
-        conversations = self.admin_status.get(conversation_id, [])
-        if not conversations:
+        if msg.text() =="ding":
+            await msg.say('dong -- Ddparser')
             return
 
-        file_box = None
-        if msg.type() in [MessageType.MESSAGE_TYPE_IMAGE, MessageType.MESSAGE_TYPE_VIDEO,
-                          MessageType.MESSAGE_TYPE_ATTACHMENT]:
-            file_box = await msg.to_file_box()
-            file_path = os.path.join(self.file_cache_dir, file_box.name)
-
-            await file_box.to_file(file_path, overwrite=True)
-            file_box = FileBox.from_file(file_path)
-#记得读取记忆的时候，如果people的名称本身也是一个entity的话，那么要把相关的记忆也加进来
-        for conversation in conversations:
-            if conversation.type == 'Room':
-                forwarder_target = await self.bot.Room.load(conversation.id)
-            elif conversation.type == 'Contact':
-                forwarder_target = await self.bot.Contact.load(conversation.id)
-            else:
-                continue
-
-            # TODO: 转发图片貌似还是有些问题
-            if file_box:
-                await forwarder_target.say(file_box)
-
-            # 如果是文本的话，是需要单独来转发
-            elif msg.type() == MessageType.MESSAGE_TYPE_TEXT:
-                await forwarder_target.say(msg.text())
-
-            elif forwarder_target:
-                await msg.forward(forwarder_target)
-
-
+    """
     def soul(self):
 
         yuan = Yuan(input_prefix="",
@@ -253,6 +229,7 @@ class DramaPlugin(WechatyPlugin):
         else:
             await msg.say('something must be wrong')
             self.logger.info('no reply, something goes wrong')
+    """
 
     async def on_message(self, msg: Message) -> None:
         talker = msg.talker()
@@ -271,51 +248,23 @@ class DramaPlugin(WechatyPlugin):
 
         # 3. message pre-process
         """
-        1. 是否是文本消息，排除不支持的消息类型（目前只支持文本）
+        1. 是否是文本消息，排除不支持的消息类型（目前只支持文本，另外支持一个emoj，emoj统一识别为
+        第一条判定为greating，后面都判定为meaningless）
         2. 预设声明发送（eg首次使用隐私声明）
         3. 敏感词检测
+        4. 去掉特殊符号，比如@ /s等
+        5. 随机等待0~0.5秒，避免线程和api申请频率过高
         """
-        
+        text = await msg.mention_text()
+        if self.gfw.filter(text):
+            self.logger.info(f'{text} is filtered, for the reason of {self.gfw.filter(text)}')
+            return
+
         # 4. check the status of the talker and load the scenario rule-sheet
 
 
+        # 5. intents and entity recognition
 
-        # 5. the soul
+        # 6. ai sou1 response
 
-
-        text = msg.text()
-        if room:
-            conversation_id = room.room_id
-        else:
-            conversation_id = talker.contact_id
-
-        # at 条件触发
-        if conversation_id not in self.admin_status and self.trigger_with_at:
-            mention_self = await msg.mention_self()
-            if not mention_self:
-                return
-            text = remove_at_info(text=text)
-
-        if conversation_id in self.admin_status:
-            await self.forward_message(msg, conversation_id=conversation_id)
-            self.admin_status.pop(conversation_id)
-            return
-
-        # filter the target conversations
-
-        if text.startswith(self.command_prefix):
-            # parse token & command
-            text = text[len(self.command_prefix):]
-            text = text[text.index('#') + 1:].strip()
-
-            receivers = self.config_factory.get_receivers(conv)
-            if not receivers:
-                return
-
-            self.admin_status[conversation_id] = receivers
-
-            if text:
-                # set the words to the message
-                msg.payload.text = text
-                await self.forward_message(msg, conversation_id=conversation_id)
-                self.admin_status.pop(conversation_id)
+        # 7. colorful eggs https://ai.baidu.com/ai-doc/wenxin/Zl33wtflg
