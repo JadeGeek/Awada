@@ -62,7 +62,7 @@ class DramaPlugin(WechatyPlugin):
         if self.self_memory is None or self.user_memory is None:
             raise RuntimeError('Drada memory.xlsx not valid, pls refer to above info and try again')
 
-        # 5. test the rasa nlu server and compare the intents and entries with the meta/memory data
+        # 5. initialize & test the rasa nlu server
         self.rasa_url = 'http://localhost:'+port+'/model/parse'
         self.http = urllib3.PoolManager()
 
@@ -73,11 +73,6 @@ class DramaPlugin(WechatyPlugin):
 
         if not _result:
             raise RuntimeError('Rasa server not running, pls start it first and trans the right port in str')
-
-        for intent in _result["intent_ranking"]:
-            if intent["name"] not in self.mmrules.keys():
-                self.logger.warning('Intents in the MMrules.xlsx must be the same as the intents in the rasa server')
-                raise RuntimeError('Intents in the MMrules.xlsx must be the same as the intents in the rasa server')
 
         self.gfw = DFAFilter()
         self.gfw.parse()
