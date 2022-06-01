@@ -3,11 +3,11 @@ import re
 import json
 import urllib3
 import time
+from paddlenlp import Taskflow
 from typing import (
     Dict, Optional, List, Set, Tuple, Union
 )
 import xlrd
-
 from wechaty import (
     Contact,
     FileBox,
@@ -58,6 +58,10 @@ class DramaPlugin(WechatyPlugin):
             raise RuntimeError('Drada MMrules.xlsx not valid, pls refer to above info and try again')
 
         # 4. load self-memory data and create memory-dict for users
+        with open(os.path.join(self.config_files, 'focus.json'), 'r', encoding='utf-8') as f:
+            schema = json.load(f)
+        self.uie = Taskflow('information_extraction', schema=schema, task_path=f'{self.config_files}/')
+
         self.self_memory, self.user_memory = self._load_memory()
         if self.self_memory is None or self.user_memory is None:
             raise RuntimeError('Drada memory.xlsx not valid, pls refer to above info and try again')
@@ -85,6 +89,10 @@ class DramaPlugin(WechatyPlugin):
             self.logger.warning(f'config file url:*{self.config_files}* does not have directors.json!')
             return False
 
+        if "focus.json" not in os.listdir(self.config_files):
+            self.logger.warning(f'config file url:*{self.config_files}* does not have focus.json!')
+            return False
+
         if "MMrules.xlsx" not in os.listdir(self.config_files):
             self.logger.warning(f'config file url:*{self.config_files}* does not have MMrules.xlsx!')
             return False
@@ -99,26 +107,26 @@ class DramaPlugin(WechatyPlugin):
 
     def _load_memory(self) -> dict:
         """load the memory data and create memory-dict for users"""
-        memory_file = os.path.join(self.config_files, 'memory.xlsx')
-        data = xlrd.open_workbook(memory_file)
-        table = data.sheets()[0]
+        memory_file = os.path.join(self.config_files, 'memory.txt')
+        with open(memory_file, 'r', encoding='utf-8') as f:
+            datas = [line.strip() for line in f.readlines() if line.strip()]
 
-        nrows = table.nrows
-        if nrows == 0:
-            self.logger.warning('no data in memory.xlsx,this is not allowed')
+        if len(datas) == 0:
+            self.logger.warning('no data in memory.txt,this is not allowed')
             return None, None
+
+        focus = self.uie(datas)
 
         self_memory = {}
         user_memory = {}
-
-        for i in range(nrows):
-            k, v = table.row_values(i)
-            if k and v:
-                self_memory[k] = v
-                user_memory[k] = []
-            else:
-                self.logger.warning('No empty cell should be in the memory.xlsx, this is not allowed')
-                return None, None
+        for i in range(len(datas)):
+            for result in focus[i].values():
+                for entity in result:
+                    if entity['text'] in self_memory.keys():
+                        self_memory[entity['text']].append(datas[i])
+                    else:
+                        self_memory[entity['text']] = [datas[i]]
+                        user_memory[entity['text']] = {}
 
         return self_memory, user_memory
 
