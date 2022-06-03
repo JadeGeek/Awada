@@ -21,6 +21,7 @@ from wechaty import (
 )
 from wechaty_puppet import get_logger
 from utils.DFAFilter import DFAFilter
+from inspurai import Yuan
 
 
 class DramaPlugin(WechatyPlugin):
@@ -34,8 +35,7 @@ class DramaPlugin(WechatyPlugin):
             self,
             options: Optional[WechatyPluginOptions] = None,
             configs: str = 'drama_configs',
-            port: str = '5005',
-            multiuser: bool = True
+            port: str = '5005'
     ) -> None:
 
         super().__init__(options)
@@ -80,21 +80,15 @@ class DramaPlugin(WechatyPlugin):
             self.logger.error('load uie failed, pls check the uie/checkpoint/model_best, be sure right model files exits')
             raise e
 
-        self.self_memory = self._load_memory()
+        self.self_memory, self.user_memory_template = self._load_memory()
         if self.self_memory is None:
-            raise RuntimeError('Drada memory.xlsx not valid, pls refer to above info and try again')
-
-        self.user_memory_template = {}
-        for key in self.self_memory.keys():
-            self.user_memory_template[key] = {}
-
-        self.multiuser = multiuser
+            raise RuntimeError('Drada memory.txt not valid, pls refer to above info and try again')
 
         if "user_memory.json" in self.config_files:
             with open(os.path.join(self.config_url, 'user_memory.json'), 'r', encoding='utf-8') as f:
                 self.user_memory = json.load(f)
         else:
-            self.user_memory = {} if multiuser else self.user_memory_template
+            self.user_memory = {}
 
         if "users.json" in self.config_files:
             with open(os.path.join(self.config_url, 'users.json'), 'r', encoding='utf-8') as f:
@@ -103,9 +97,15 @@ class DramaPlugin(WechatyPlugin):
             self.users = {}
 
         # 5. load scenario rule-table
-        self.scenarios = self._load_scenarios()
+        self.scenarios, self.last_turn_memory_template = self._load_scenarios()
         if self.scenarios is None:
             raise RuntimeError('Drada scenarios.xlsx not valid, pls refer to above info and try again. make sure at lease one scenario is well defined.')
+
+        if "last_turn_memory.json" in self.config_files:
+            with open(os.path.join(self.config_url, 'last_turn_memory.json'), 'r', encoding='utf-8') as f:
+                self.last_turn_memory = json.load(f)
+        else:
+            self.last_turn_memory = {}
 
         # 6. initialize & test the rasa nlu server
         self.rasa_url = 'http://localhost:'+port+'/model/parse'
@@ -123,7 +123,8 @@ class DramaPlugin(WechatyPlugin):
         self.gfw.parse()
 
         self.take_over = False
-        self.temp_talker = wechaty.Contact
+        self.temp_talker: [wechaty.Contact] = None
+        self.take_over_director: [wechaty.Contact] = None
 
         self.logger.info('Drada plugin init success')
 
@@ -158,20 +159,23 @@ class DramaPlugin(WechatyPlugin):
 
         if len(datas) == 0:
             self.logger.warning('no data in memory.txt,this is not allowed')
-            return None
+            return None, None
 
         focus = self.uie(datas)
 
         self_memory = {}
+        user_memory_template = {}
         for i in range(len(datas)):
             for result in focus[i].values():
                 for entity in result:
-                    if entity['text'] in self_memory.keys():
-                        self_memory[entity['text']].append(datas[i])
-                    else:
-                        self_memory[entity['text']] = [datas[i]]
+                    if entity['probability'] > 0.6:
+                        if entity['text'] in self_memory.keys():
+                            self_memory[entity['text']].append(datas[i])
+                        else:
+                            self_memory[entity['text']] = [datas[i]]
+                            user_memory_template[entity['text']] = []
 
-        return self_memory
+        return self_memory, user_memory_template
 
     def _load_mmrules(self) -> None or dict:
         """load the Memory Mathmatics Rules from excel"""
@@ -215,31 +219,33 @@ class DramaPlugin(WechatyPlugin):
         data = xlrd.open_workbook(scenarios_file)
 
         rules = {}
+        last_turn_memory_template = {}
         for name in data.sheet_names():
             table = data.sheet_by_name(name)
             nrows = table.nrows
             if nrows == 0:
                 continue
 
+            for i in range(1, nrows):
+                if not table.cell_value(i,0):
+                    self.logger.warning('cell of the first column is empty in scenario.xlsx,this is not allowed')
+                    return None, None
+
             cols = table.ncols
             for k in range(1, cols):
                 if not table.cell_value(0,k):
                     self.logger.warning('cell of the first row is empty in scenario.xlsx,this is not allowed')
-                    return None
+                    return None, None
 
             rules[name] = {}
-            for i in range(1, nrows):
-                for k in range(cols):
-                    if k == 0:
-                        if table.cell_value(i,k):
-                            rule = table.cell_value(i,k)
-                            rules[name][rule] = {}
-                        else:
-                            self.logger.warning('cell of the first column is empty in scenario.xlsx,this is not allowed')
-                            return None
-                        continue
-                    rules[name][rule][table.cell_value(0,k)] = table.cell_value(i,k)
-        return rules
+            last_turn_memory_template[name] = {}
+            for k in range(1, cols):
+                last_turn_memory_template[name][table.cell_value(0, k)] = []
+                for i in range(1, nrows):
+                    if table.cell_value(i,k):
+                        rules[name][table.cell_value(0, k)][table.cell_value(i, 0)] = [table.cell_value(i, k).split('/n')]
+
+        return rules, last_turn_memory_template
 
 
     async def director_message(self, msg: Message):
@@ -284,11 +290,12 @@ class DramaPlugin(WechatyPlugin):
             return
 
         if msg.text() == 'reload SelfMemory':
-            selfmemory = self._load_memory()
+            selfmemory, user_memory_template = self._load_memory()
             if selfmemory is None:
                 await msg.say("memory.txt is empty, so I will not change my memory")
             else:
                 self.self_memory = selfmemory
+                self.user_memory_template = user_memory_template
                 await msg.say("self memory has been updated")
             return
 
@@ -306,11 +313,15 @@ class DramaPlugin(WechatyPlugin):
                 json.dump(self.users, f)
             with open(os.path.join(self.config_url, 'user_memory.json'), 'r', encoding='utf-8') as f:
                 json.dump(self.user_memory, f)
+            with open(os.path.join(self.config_url, 'last_turn_memory.json'), 'r', encoding='utf-8') as f:
+                json.dump(self.last_turn_memory, f)
+
             await msg.say(f"user status and memory has been saved in {self.config_url}. I'll read instead of create new till you delete the files")
             return
 
         if msg.text() == "take over":
             self.take_over = True
+            self.take_over_director = await self.bot.Contact.find(msg.talker().name)
             await msg.say("ok your turn. to give the wheel back to me send: take over off")
             return
 
@@ -321,11 +332,28 @@ class DramaPlugin(WechatyPlugin):
 
         if self.take_over:
             await msg.forward(self.temp_talker)
+            await msg.say(f"msg has been forward to {self.temp_talker.name}")
+            self.last_turn_memory[self.temp_talker.contact_id][self.users[self.temp_talker.contact_id][1]][self.users[self.temp_talker.contact_id][0]].append(f'你说：“{msg.text()}“')
         else:
             await msg.say("send help to me to check what you can do")
 
+    def nlu_intent(self, text: str) -> str:
+        _test_data = {'text': text}
+        _encoded_data = json.dumps(_test_data)
+        _test_res = self.http.request('POST', self.rasa_url, body=_encoded_data)
+        _result = json.loads(_test_res.data)
+        return _result['intent']['name']
 
-    def soul(self, text, talker_id):
+    def nlu_info(self,text:str)-> list:
+        _result = self.uie(text)
+        info = []
+        for result in _result[0].values():
+            for entity in result:
+                if entity['probability'] > 0.6:
+                    info.append(entity['text'])
+        return info
+
+    def soul(self, text:str, char:str, scenario:str,memory:dict) -> str:
 
         yuan = Yuan(input_prefix="",
                     input_suffix="：“",
@@ -340,12 +368,7 @@ class DramaPlugin(WechatyPlugin):
 
         reply = yuan.submit_API(text, trun="”")
 
-        if reply:
-            await msg.say(reply)
-            self.logger.info(reply)
-        else:
-            await msg.say('something must be wrong')
-            self.logger.info('no reply, something goes wrong')
+
 
 
     async def on_message(self, msg: Message) -> None:
@@ -362,19 +385,21 @@ class DramaPlugin(WechatyPlugin):
 
         # 3. new-user register and old-user session load
         if talker.contact_id not in self.users.keys():
-            self.users[talker.contact_id] = ['zhangwuji', 'yitiantulong', 'inturn']
-            if self.multiuser:
-                self.user_memory[talker.contact_id] = self.user_memory_template
-            await talker.say("") #statement
+            self.users[talker.contact_id] = ['zhangwuji', 'yitiantulong', 'welcome']
+            self.user_memory[talker.contact_id] = self.user_memory_template
+            self.last_turn_memory[talker.contact_id] = self.last_turn_memory_template
+            #实际上这里是用talker.contact_id充当"局"的概念，即同样的游戏可能同时开好几局，所有的背景记忆是一样的，但是用户相关的记忆是要分开的。
+            #因为这一次是单场景单角色，所以就相当于"一个用户是一句"了，所以用contact_id作为区分，假如是剧本啥这种，就可以用room_id
+            await talker.say("先声明哈，我们之间的对话信息可能会被公开，介意的话请终止对话！/n"
+                             "请您务必不要透露任何隐私信息，请您务发表不当言论")
             return
 
         # 4. message pre-process
         """
         1. 是否是文本消息，排除不支持的消息类型（目前只支持文本，另外支持一个emoj，emoj统一识别为
         第一条判定为greating，后面都判定为meaningless）
-        3. 敏感词检测
-        4. 去掉特殊符号，比如@ /n等
-        5. 随机等待0~0.5秒，避免线程和api申请频率过高
+        2. 敏感词检测
+        3. 去掉特殊符号，比如@ /n等
         """
         if msg.type() not in [MessageType.MESSAGE_TYPE_TEXT, MessageType.MESSAGE_TYPE_EMOTICON]:
             return
@@ -391,25 +416,60 @@ class DramaPlugin(WechatyPlugin):
             await msg.say('请勿发表不当言论，谢谢配合')
             return
 
-        # 5. check the status of the talker and load the scenario rule-sheet
-        if self.users[talker.contact_id][2] == 'endofstory':
-            await talker.say("")
+        # 5. check the status of the talker. for special status do the special action
+        scenario = self.users[talker.contact_id][1]
+        character = self.users[talker.contact_id][0]
+        status = self.users[talker.contact_id][2]
+        memory = self.user_memory[talker.contact_id]
+        #last_turn_memory = self.last_turn_memory[talker.contact_id][scenario][character]
+        rules = self.scenarios[scenario][character]
+
+        if status == 'welcome':
+            await talker.say("game pipeline-- to consider more")
+            rules['DESCRIPTION'] += "game pipeline-- to consider more"
+            self.users[talker.contact_id][2] = "in-process"
             return
 
-        character = self.users[talker.contact_id][0]
-        memory = self.user_memory[talker.contact_id] if self.multiuser else self.user_memory
-        rules = self.scenarios[self.users[talker.contact_id][1]]
+        last_dialog = ''.join(self.last_turn_memory[scenario][character])
 
-        if 'welcome' in self.scenarios[self.users[talker.contact_id][1]].keys():
-            if self.scenarios[self.users[talker.contact_id][1]]['welcome'][self.users[talker.contact_id][0]]:
-                await talker.say(
-                    self.scenarios[self.users[talker.contact_id][1]]['welcome'][self.users[talker.contact_id][0]][1:])
+        self.temp_talker = talker
+        self.last_turn_memory[talker.contact_id][scenario][character] = [f'{character}说：“{text}“']
+        if self.take_over is True:
+            await self.take_over_director.say(f"{character} in the {scenario} just say: {text}. pls reply directly here")
+            await self.take_over_director.say(f"last turn dialog: {last_dialog}")
+            return
 
+        # 6. intent judgment, focus information_extraction acton-squence
+        intent = self.nlu_intent(text)
+        info = self.nlu_info(text)
 
-        # 6. intents and entity recognition
+        if self.mmrules[intent]['read'] == 'yes':
+            memory_squence = []
+            memory_squence.extend(memory[entity] for entity in info if entity in memory.keys())
+            memory_squence.sort(key=lambda k: (k.get('time')), reverse=False)
+            memory_text = ''
+            for sentence in memory_squence:
+                memory_text += sentence['sentence']
 
-        # 7. ai sou1 response
+            selfmemory_squence = []
+            selfmemory_squence.extend(self.self_memory[entity] for entity in info if entity in self.self_memory.keys())
+            seflmemory_text = ''.join(list(set(selfmemory_squence)))
+
+        replies = []
+        for action in rules[intent]:
+            if action[0] == 'S':
+                reply = action[0][1:]
+            else:
+                reply = self.soul(text, action, intent, rules, character, memory, last_turn_memory)
+                if reply is None:
+                    self.logger.warning(f'generation failed with the following input:{character},{intent},{action},{text},{talker.contact_id}')
+                    return
+            await msg.say(reply)
+            self.last_turn_memory[talker.contact_id][scenario][character].append(f'你说：“{reply}“')
+            replies.append(reply)
+
+        # 7. memory saving
+        self.last_turn_memory[talker.contact_id][scenario][character].insert(0, f'{character}说：“{text}“')
+        for reply in replies:
 
         # colorful eggs https://ai.baidu.com/ai-doc/wenxin/Zl33wtflg
-
-
