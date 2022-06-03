@@ -12,10 +12,8 @@ from typing import (
 import xlrd
 from wechaty import (
     Contact,
-    FileBox,
     MessageType,
     WechatyPlugin,
-    Room,
     Message,
     WechatyPluginOptions
 )
@@ -26,7 +24,7 @@ from inspurai import Yuan
 
 class DramaPlugin(WechatyPlugin):
     """
-    AI soul 在 Pyhton-wechat的插件
+    基于Pyhton-wechat框架的AI soul实现
     用于Awada长期运营
     Author：bigbrother666
     All rights reserved 2022
@@ -107,7 +105,7 @@ class DramaPlugin(WechatyPlugin):
         else:
             self.last_turn_memory = {}
 
-        # 6. initialize & test the rasa nlu server
+        # 6. initialize & test the rasa nlu server and yuan-api
         self.rasa_url = 'http://localhost:'+port+'/model/parse'
         self.http = urllib3.PoolManager()
 
@@ -119,6 +117,16 @@ class DramaPlugin(WechatyPlugin):
         if not _result:
             raise RuntimeError('Rasa server not running, pls start it first and trans the right port in str')
 
+        self.yuan = Yuan(engine='dialog',
+                    input_prefix="",
+                    input_suffix="",
+                    output_prefix="",
+                    output_suffix="",)
+
+        engine_name = self.yuan.get_engine()
+        self.logger.info(engine_name)
+
+        # 7. last process
         self.gfw = DFAFilter()
         self.gfw.parse()
 
@@ -344,32 +352,95 @@ class DramaPlugin(WechatyPlugin):
         _result = json.loads(_test_res.data)
         return _result['intent']['name']
 
-    def nlu_info(self,text:str)-> list:
-        _result = self.uie(text)
-        info = []
-        for result in _result[0].values():
-            for entity in result:
-                if entity['probability'] > 0.6:
-                    info.append(entity['text'])
-        return info
+    def nlu_info(self, text:Union[str,list])-> list:
+        results = self.uie(text)
+        infos = []
+        for _result in results:
+            info = []
+            for result in _result.values():
+                for entity in result:
+                    if entity['probability'] > 0.6:
+                        info.append(entity['text'])
+            if len(info) > 0:
+                infos.append(info)
+        return infos
 
-    def soul(self, text:str, char:str, scenario:str,memory:dict) -> str:
+    async def soul(self, text: str, talker: Contact, scenario: str, character: str, memory: dict, last_dialog: str, rules:dict) -> None:
+        # 1. intent judgment, focus information_extraction acton-squence
+        intent = self.nlu_intent(text)
+        info = self.nlu_info(text)[0]
 
-        yuan = Yuan(input_prefix="",
-                    input_suffix="：“",
-                    output_prefix="",
-                    output_suffix="",)
+        # 2. act the action in sequence
+        memory_text = ''
+        seflmemory_text = ''
+        if self.mmrules[intent]['read'] == 'yes':
+            memory_squence = []
+            memory_squence.extend(memory[entity] for entity in info if entity in memory.keys())
+            memory_squence.sort(key=lambda k: (k.get('time')), reverse=False)
+            for sentence in memory_squence:
+                memory_text += sentence['text']
 
-        engine_name = yuan.get_engine()
-        self.logger.info(engine_name)
+            selfmemory_squence = []
+            selfmemory_squence.extend(self.self_memory[entity] for entity in info if entity in self.self_memory.keys())
+            seflmemory_text = ''.join(list(set(selfmemory_squence)))
 
-        query = yuan.craft_query(text)
-        self.logger.info(query)
+        if len(memory_text) > 0:
+            pre_prompt = seflmemory_text + rules['DESCRIPTION'] + "，刚才" + memory_text + "，刚刚" + last_dialog + "，现在" + character + "说：“" + text + "“你"
+        else:
+            pre_prompt = seflmemory_text + rules['DESCRIPTION'] + "，刚刚" + last_dialog + "，现在" + character + "说：“" + text + "“你"
 
-        reply = yuan.submit_API(text, trun="”")
+        addtion_action = ''
+        for entity in info:
+            if entity in rules.keys():
+                addtion_action = rules[entity]
+                break
 
+        if len(addtion_action) > 0:
+            pre_prompt += addtion_action
 
+        actions_txt = rules[intent] if intent in rules.keys() else rules["no_intent"]
+        actions = actions_txt.split('/n')
+        replies = []
+        for action in actions:
+            if action[0] == 'S':
+                reply = action[0][1:]
+            else:
+                prompt = pre_prompt + action + "说：“"
+                self.logger.info(prompt)
+                self.logger.info("----------------------------/n")
+                reply = self.yuan.submit_API(prompt, trun="”")
+                if reply is None:
+                    self.logger.warning(f'generation failed with the following input:{character},{intent},{action},{text},{scenario}')
+                    continue
+            await talker.say(reply)
+            self.last_turn_memory[talker.contact_id][scenario][character].append(f'你说：“{reply}“')
+            replies.append(reply)
 
+        # 3. memory saving
+        if self.mmrules[intent]['bi'] == 'yes':
+            replies.insert(0, text)
+            infos = self.nlu_info(replies)
+        else:
+            infos = self.nlu_info(text)
+
+        t = time.time()
+        for entity in infos[0]:
+            if entity in memory.keys():
+                memory[entity].append({"time":t, "text":f'{character}说：“{text}“'})
+            else:
+                memory[entity] = [{"time":t, "text":f'{character}说：“{text}“'}]
+
+        time.sleep(0.1)
+        t = time.time()
+        if len(infos) > 0:
+            for i in range(1,len(infos)):
+                for entity in info[i]:
+                    if entity in memory.keys():
+                        memory[entity].append({"time": t, "text": f'你说：“{text}“'})
+                    else:
+                        memory[entity] = [{"time": t, "text": f'你说：“{text}“'}]
+
+        self.user_memory[talker.contact_id] = memory
 
     async def on_message(self, msg: Message) -> None:
         talker = msg.talker()
@@ -385,7 +456,7 @@ class DramaPlugin(WechatyPlugin):
 
         # 3. new-user register and old-user session load
         if talker.contact_id not in self.users.keys():
-            self.users[talker.contact_id] = ['zhangwuji', 'yitiantulong', 'welcome']
+            self.users[talker.contact_id] = ['zhangwuji', 'welcome']
             self.user_memory[talker.contact_id] = self.user_memory_template
             self.last_turn_memory[talker.contact_id] = self.last_turn_memory_template
             #实际上这里是用talker.contact_id充当"局"的概念，即同样的游戏可能同时开好几局，所有的背景记忆是一样的，但是用户相关的记忆是要分开的。
@@ -419,57 +490,25 @@ class DramaPlugin(WechatyPlugin):
         # 5. check the status of the talker. for special status do the special action
         scenario = self.users[talker.contact_id][1]
         character = self.users[talker.contact_id][0]
-        status = self.users[talker.contact_id][2]
         memory = self.user_memory[talker.contact_id]
-        #last_turn_memory = self.last_turn_memory[talker.contact_id][scenario][character]
+        last_dialog = ''.join(self.last_turn_memory[talker.contact_id][scenario][character])
         rules = self.scenarios[scenario][character]
-
-        if status == 'welcome':
-            await talker.say("game pipeline-- to consider more")
-            rules['DESCRIPTION'] += "game pipeline-- to consider more"
-            self.users[talker.contact_id][2] = "in-process"
+        self.temp_talker = talker
+        """
+        A storyline mechanism should be here to judge and guide the transition between scenarios, which I will do in the future
+        welcome should also be a scenario
+        and there should be something program can learn when and how to bring user from one scenario to another
+        """
+        if scenario == 'welcome':
+            await talker.say("just the same as description in scenario yitiantulong")
+            self.users[talker.contact_id][1] = "yitiantulong"
             return
 
-        last_dialog = ''.join(self.last_turn_memory[scenario][character])
-
-        self.temp_talker = talker
         self.last_turn_memory[talker.contact_id][scenario][character] = [f'{character}说：“{text}“']
         if self.take_over is True:
             await self.take_over_director.say(f"{character} in the {scenario} just say: {text}. pls reply directly here")
             await self.take_over_director.say(f"last turn dialog: {last_dialog}")
-            return
-
-        # 6. intent judgment, focus information_extraction acton-squence
-        intent = self.nlu_intent(text)
-        info = self.nlu_info(text)
-
-        if self.mmrules[intent]['read'] == 'yes':
-            memory_squence = []
-            memory_squence.extend(memory[entity] for entity in info if entity in memory.keys())
-            memory_squence.sort(key=lambda k: (k.get('time')), reverse=False)
-            memory_text = ''
-            for sentence in memory_squence:
-                memory_text += sentence['sentence']
-
-            selfmemory_squence = []
-            selfmemory_squence.extend(self.self_memory[entity] for entity in info if entity in self.self_memory.keys())
-            seflmemory_text = ''.join(list(set(selfmemory_squence)))
-
-        replies = []
-        for action in rules[intent]:
-            if action[0] == 'S':
-                reply = action[0][1:]
-            else:
-                reply = self.soul(text, action, intent, rules, character, memory, last_turn_memory)
-                if reply is None:
-                    self.logger.warning(f'generation failed with the following input:{character},{intent},{action},{text},{talker.contact_id}')
-                    return
-            await msg.say(reply)
-            self.last_turn_memory[talker.contact_id][scenario][character].append(f'你说：“{reply}“')
-            replies.append(reply)
-
-        # 7. memory saving
-        self.last_turn_memory[talker.contact_id][scenario][character].insert(0, f'{character}说：“{text}“')
-        for reply in replies:
+        else:
+            await self.soul(text, talker, scenario, character, memory, last_dialog, rules)
 
         # colorful eggs https://ai.baidu.com/ai-doc/wenxin/Zl33wtflg

@@ -67,6 +67,5 @@ def reply_request(requestId,cycle_count=5):
         if response_text["resData"] != None:
             return response_text
         if response_text["flag"] == False and i ==cycle_count-1:
-            raise  RuntimeWarning(response_text)
+            raise RuntimeWarning(response_text)
         time.sleep(3)
-
