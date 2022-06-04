@@ -1,5 +1,4 @@
 import os
-import re
 import json
 import urllib3
 import time
@@ -7,7 +6,7 @@ import time
 import wechaty
 from paddlenlp import Taskflow
 from typing import (
-    Dict, Optional, List, Set, Tuple, Union
+    Optional, Union
 )
 import xlrd
 from wechaty import (
@@ -19,7 +18,7 @@ from wechaty import (
 )
 from wechaty_puppet import get_logger
 from utils.DFAFilter import DFAFilter
-from inspurai import Yuan
+from plugins.inspurai.inspurai import Yuan
 
 
 class DramaPlugin(WechatyPlugin):
@@ -43,7 +42,7 @@ class DramaPlugin(WechatyPlugin):
         if len(self.config_files) < 5:
             raise RuntimeError('Drada plugin config_files not enough, pls add and try again')
 
-        self.cache_dir = f'./{self.name}'
+        self.cache_dir = f'./.{self.name}'
         self.file_cache_dir = f'{self.cache_dir}/file'
         os.makedirs(self.file_cache_dir, exist_ok=True)
 
@@ -99,11 +98,10 @@ class DramaPlugin(WechatyPlugin):
         if self.scenarios is None:
             raise RuntimeError('Drada scenarios.xlsx not valid, pls refer to above info and try again. make sure at lease one scenario is well defined.')
 
-        if "last_turn_memory.json" in self.config_files:
-            with open(os.path.join(self.config_url, 'last_turn_memory.json'), 'r', encoding='utf-8') as f:
-                self.last_turn_memory = json.load(f)
-        else:
-            self.last_turn_memory = {}
+        self.last_turn_memory = {}
+        if self.user_memory:
+            for key in self.user_memory.keys():
+                self.last_turn_memory[key] = self.last_turn_memory_template
 
         # 6. initialize & test the rasa nlu server and yuan-api
         self.rasa_url = 'http://localhost:'+port+'/model/parse'
@@ -124,7 +122,7 @@ class DramaPlugin(WechatyPlugin):
                     output_suffix="",)
 
         engine_name = self.yuan.get_engine()
-        self.logger.info(engine_name)
+        self.logger.info(f'with yuan engine:{engine_name},with temperature=0.9,max_tokens=100,topK=1,topP=0.9')
 
         # 7. last process
         self.gfw = DFAFilter()
@@ -231,7 +229,7 @@ class DramaPlugin(WechatyPlugin):
         for name in data.sheet_names():
             table = data.sheet_by_name(name)
             nrows = table.nrows
-            if nrows == 0:
+            if nrows < 2:
                 continue
 
             for i in range(1, nrows):
@@ -249,9 +247,10 @@ class DramaPlugin(WechatyPlugin):
             last_turn_memory_template[name] = {}
             for k in range(1, cols):
                 last_turn_memory_template[name][table.cell_value(0, k)] = []
+                rules[name][table.cell_value(0, k)] = {}
                 for i in range(1, nrows):
                     if table.cell_value(i,k):
-                        rules[name][table.cell_value(0, k)][table.cell_value(i, 0)] = [table.cell_value(i, k).split('/n')]
+                        rules[name][table.cell_value(0, k)][table.cell_value(i, 0)] = table.cell_value(i, k)
 
         return rules, last_turn_memory_template
 
@@ -267,14 +266,14 @@ class DramaPlugin(WechatyPlugin):
             return
         # 2. help menu
         if msg.text() == 'help':
-            await msg.say("Drama Director Code: /n"
-                          "ding -- check heartbeat /n"
-                          "reload directors --- reload director.json /n"
-                          "reload MMrules -- reload MMrules.xlsx /n"
-                          "reload SelfMemory -- reload memory.txt /n"
-                          "reload scenarios -- reload scenarios.xlsx"
-                          "save -- save the users status and users memory so that game will continue instead of restart/n"
-                          "take over -- take over the AI for a time /n"
+            await msg.say("Drama Director Code: \n"
+                          "ding -- check heartbeat \n"
+                          "reload directors --- reload director.json \n"
+                          "reload mmrules -- reload MMrules.xlsx \n"
+                          "reload memory -- reload memory.txt \n"
+                          "reload scenarios -- reload scenarios.xlsx \n"
+                          "save -- save the users status and users memory so that game will continue instead of restart\n"
+                          "take over -- take over the AI for a time \n"
                           "take over off -- stop the take_over")
             return
         # 3.functions
@@ -288,7 +287,7 @@ class DramaPlugin(WechatyPlugin):
                 await msg.say('Drama director list has been updated')
             return
 
-        if msg.text() == 'reload MMrules':
+        if msg.text() == 'reload mmrules':
             mmrules = self._load_mmrules()
             if mmrules is None:
                 await msg.say("Drada MMrules.xlsx not valid, I'll keep the old set. no change happened")
@@ -297,33 +296,35 @@ class DramaPlugin(WechatyPlugin):
                 await msg.say("Drada MMrules has been updated")
             return
 
-        if msg.text() == 'reload SelfMemory':
+        if msg.text() == 'reload memory':
             selfmemory, user_memory_template = self._load_memory()
             if selfmemory is None:
                 await msg.say("memory.txt is empty, so I will not change my memory")
             else:
                 self.self_memory = selfmemory
                 self.user_memory_template = user_memory_template
-                await msg.say("self memory has been updated")
+                await msg.say("self memory has been updated.\n"
+                              "Attention: it'a actually very dagerous to change the memory during program running")
             return
 
         if msg.text() == 'reload scenarios':
-            scenarios = self._load_scenarios()
-            if scenarios in None:
+            scenarios, last_turn_memory_template = self._load_scenarios()
+            if scenarios is None:
                 await msg.say("scenarios.xlsx is empty, so I will not reload scenarios. No change happened")
+            elif last_turn_memory_template.keys() != self.last_turn_memory_template.keys():
+                await msg.say("You should not change peoples in the scenarios during program is running, you have to restart to update")
             else:
                 self.scenarios = scenarios
+                self.last_turn_memory_template = last_turn_memory_template
                 await msg.say("scenarios has been updated")
             return
 
         if msg.text() == 'save':
-            with open(os.path.join(self.config_url, 'users.json'), 'r', encoding='utf-8') as f:
+            with open(os.path.join(self.config_url, 'users.json'), 'w', encoding='utf-8') as f:
                 json.dump(self.users, f)
-            with open(os.path.join(self.config_url, 'user_memory.json'), 'r', encoding='utf-8') as f:
+            with open(os.path.join(self.config_url, 'user_memory.json'), 'w', encoding='utf-8') as f:
                 json.dump(self.user_memory, f)
-            with open(os.path.join(self.config_url, 'last_turn_memory.json'), 'r', encoding='utf-8') as f:
-                json.dump(self.last_turn_memory, f)
-
+            # for director may change the people of scenarios during restart, so we donot save the last_turn_memory
             await msg.say(f"user status and memory has been saved in {self.config_url}. I'll read instead of create new till you delete the files")
             return
 
@@ -341,7 +342,7 @@ class DramaPlugin(WechatyPlugin):
         if self.take_over:
             await msg.forward(self.temp_talker)
             await msg.say(f"msg has been forward to {self.temp_talker.name}")
-            self.last_turn_memory[self.temp_talker.contact_id][self.users[self.temp_talker.contact_id][1]][self.users[self.temp_talker.contact_id][0]].append(f'你说：“{msg.text()}“')
+            self.last_turn_memory[self.temp_talker.contact_id][self.users[self.temp_talker.contact_id][1]][self.users[self.temp_talker.contact_id][0]].append(f'你说：“{msg.text()}”')
         else:
             await msg.say("send help to me to check what you can do")
 
@@ -352,7 +353,7 @@ class DramaPlugin(WechatyPlugin):
         _result = json.loads(_test_res.data)
         return _result['intent']['name']
 
-    def nlu_info(self, text:Union[str,list])-> list:
+    def nlu_info(self, text:Union[str,list]) -> list:
         results = self.uie(text)
         infos = []
         for _result in results:
@@ -361,8 +362,7 @@ class DramaPlugin(WechatyPlugin):
                 for entity in result:
                     if entity['probability'] > 0.6:
                         info.append(entity['text'])
-            if len(info) > 0:
-                infos.append(info)
+            infos.append(list(set(info)))
         return infos
 
     async def soul(self, text: str, talker: Contact, scenario: str, character: str, memory: dict, last_dialog: str, rules:dict) -> None:
@@ -372,22 +372,32 @@ class DramaPlugin(WechatyPlugin):
 
         # 2. act the action in sequence
         memory_text = ''
-        seflmemory_text = ''
-        if self.mmrules[intent]['read'] == 'yes':
+        selfmemory_text = ''
+        if len(info) > 0 and self.mmrules[intent]['read'] == 'yes':
             memory_squence = []
-            memory_squence.extend(memory[entity] for entity in info if entity in memory.keys())
-            memory_squence.sort(key=lambda k: (k.get('time')), reverse=False)
-            for sentence in memory_squence:
-                memory_text += sentence['text']
+            for entity in info:
+                if entity in memory.keys():
+                    memory_squence += memory[entity]
+            if len(memory_squence) > 0:
+                memory_squence.sort(key=lambda k: (k.get('time')), reverse=False)
+                for sentence in memory_squence:
+                    memory_text += sentence['text']
 
             selfmemory_squence = []
-            selfmemory_squence.extend(self.self_memory[entity] for entity in info if entity in self.self_memory.keys())
-            seflmemory_text = ''.join(list(set(selfmemory_squence)))
+            for entity in info:
+                if entity in self.self_memory.keys():
+                    selfmemory_squence += self.self_memory[entity]
+            selfmemory_text = ''.join(set(selfmemory_squence))
+
+        if len(selfmemory_text) > 0:
+            pre_prompt = "你记得：" + selfmemory_text + "……现在" + rules['DESCRIPTION']
+        else:
+            pre_prompt = rules['DESCRIPTION']
 
         if len(memory_text) > 0:
-            pre_prompt = seflmemory_text + rules['DESCRIPTION'] + "，刚才" + memory_text + "，刚刚" + last_dialog + "，现在" + character + "说：“" + text + "“你"
+            pre_prompt += "，" + memory_text + "，" + last_dialog + character + "说：“" + text + "”你"
         else:
-            pre_prompt = seflmemory_text + rules['DESCRIPTION'] + "，刚刚" + last_dialog + "，现在" + character + "说：“" + text + "“你"
+            pre_prompt += "，" + last_dialog + character + "说：“" + text + "”你"
 
         addtion_action = ''
         for entity in info:
@@ -395,58 +405,60 @@ class DramaPlugin(WechatyPlugin):
                 addtion_action = rules[entity]
                 break
 
-        if len(addtion_action) > 0:
-            pre_prompt += addtion_action
+        pre_prompt += addtion_action
 
-        actions_txt = rules[intent] if intent in rules.keys() else rules["no_intent"]
-        actions = actions_txt.split('/n')
+        if intent in rules.keys():
+            actions_txt = rules[intent]
+            actions = actions_txt.split('\n')
+        else:
+            actions = ['']
+
         replies = []
         for action in actions:
-            if action[0] == 'S':
-                reply = action[0][1:]
+            if action.startswith('S'):
+                reply = action[1:]
             else:
                 prompt = pre_prompt + action + "说：“"
                 self.logger.info(prompt)
-                self.logger.info("----------------------------/n")
+                self.logger.info("----------------------------\n")
                 reply = self.yuan.submit_API(prompt, trun="”")
                 if reply is None:
                     self.logger.warning(f'generation failed with the following input:{character},{intent},{action},{text},{scenario}')
                     continue
             await talker.say(reply)
-            self.last_turn_memory[talker.contact_id][scenario][character].append(f'你说：“{reply}“')
+            self.last_turn_memory[talker.contact_id][scenario][character].append(f'你说：“{reply}”')
             replies.append(reply)
 
         # 3. memory saving
-        if self.mmrules[intent]['bi'] == 'yes':
-            replies.insert(0, text)
-            infos = self.nlu_info(replies)
-        else:
-            infos = self.nlu_info(text)
-
         t = time.time()
-        for entity in infos[0]:
+        for entity in info:
             if entity in memory.keys():
-                memory[entity].append({"time":t, "text":f'{character}说：“{text}“'})
+                memory[entity].append({"time":t, "text":f'{character}说：“{text}”'})
             else:
-                memory[entity] = [{"time":t, "text":f'{character}说：“{text}“'}]
+                memory[entity] = [{"time":t, "text":f'{character}说：“{text}”'}]
 
-        time.sleep(0.1)
+        if self.mmrules[intent]['bi'] == 'no':
+            return
+
+        infos = self.nlu_info(replies)
         t = time.time()
-        if len(infos) > 0:
-            for i in range(1,len(infos)):
-                for entity in info[i]:
-                    if entity in memory.keys():
-                        memory[entity].append({"time": t, "text": f'你说：“{text}“'})
-                    else:
-                        memory[entity] = [{"time": t, "text": f'你说：“{text}“'}]
+        for i in range(len(replies)):
+            if len(infos[i]) == 0:
+                continue
+            for entity in infos[i]:
+                if entity in memory.keys():
+                    memory[entity].append({"time": t, "text": f'你说：“{replies[i]}”'})
+                else:
+                    memory[entity] = [{"time": t, "text": f'你说：“{replies[i]}”'}]
 
         self.user_memory[talker.contact_id] = memory
+        print(self.user_memory)
 
     async def on_message(self, msg: Message) -> None:
         talker = msg.talker()
 
-        # 1. 判断是否是自己发送的消息
-        if talker.contact_id == msg.is_self() or msg.room():
+        # 1. 判断是否是自己发送的消息\weixin service\room message
+        if talker.contact_id == msg.is_self() or talker.contact_id == "weixin" or msg.room():
             return
 
         # 2. check if is director
@@ -456,31 +468,30 @@ class DramaPlugin(WechatyPlugin):
 
         # 3. new-user register and old-user session load
         if talker.contact_id not in self.users.keys():
-            self.users[talker.contact_id] = ['zhangwuji', 'welcome']
+            self.users[talker.contact_id] = ['张无忌', 'welcome']
             self.user_memory[talker.contact_id] = self.user_memory_template
             self.last_turn_memory[talker.contact_id] = self.last_turn_memory_template
             #实际上这里是用talker.contact_id充当"局"的概念，即同样的游戏可能同时开好几局，所有的背景记忆是一样的，但是用户相关的记忆是要分开的。
             #因为这一次是单场景单角色，所以就相当于"一个用户是一句"了，所以用contact_id作为区分，假如是剧本啥这种，就可以用room_id
-            await talker.say("先声明哈，我们之间的对话信息可能会被公开，介意的话请终止对话！/n"
+            await talker.say("先声明哈，我们之间的对话信息可能会被公开，介意的话请终止对话！\n"
                              "请您务必不要透露任何隐私信息，请您务发表不当言论")
             return
 
         # 4. message pre-process
         """
-        1. 是否是文本消息，排除不支持的消息类型（目前只支持文本，另外支持一个emoj，emoj统一识别为
-        第一条判定为greating，后面都判定为meaningless）
+        1. 是否是文本消息，排除不支持的消息类型（目前只支持文本，另外支持一个emoj，emoj统一识别为：嘿嘿）
         2. 敏感词检测
-        3. 去掉特殊符号，比如@ /n等
+        3. 去掉特殊符号，比如@ \n等
         """
         if msg.type() not in [MessageType.MESSAGE_TYPE_TEXT, MessageType.MESSAGE_TYPE_EMOTICON]:
             return
 
-        if msg.room():
-            text = await msg.mention_text()
+        if msg.type() == MessageType.MESSAGE_TYPE_EMOTICON:
+            text = '嘿嘿'
         else:
             text = msg.text()
 
-        text = text.strip().replace('/n', '')
+        text = text.strip().replace('\n', '，')
 
         if self.gfw.filter(text):
             self.logger.info(f'{text} is filtered, for the reason of {self.gfw.filter(text)}')
@@ -492,8 +503,9 @@ class DramaPlugin(WechatyPlugin):
         character = self.users[talker.contact_id][0]
         memory = self.user_memory[talker.contact_id]
         last_dialog = ''.join(self.last_turn_memory[talker.contact_id][scenario][character])
-        rules = self.scenarios[scenario][character]
+        rules = self.scenarios[scenario][character] if character in self.scenarios[scenario].keys() else {'DESCRIPTION':''}
         self.temp_talker = talker
+
         """
         A storyline mechanism should be here to judge and guide the transition between scenarios, which I will do in the future
         welcome should also be a scenario
@@ -504,7 +516,7 @@ class DramaPlugin(WechatyPlugin):
             self.users[talker.contact_id][1] = "yitiantulong"
             return
 
-        self.last_turn_memory[talker.contact_id][scenario][character] = [f'{character}说：“{text}“']
+        self.last_turn_memory[talker.contact_id][scenario][character] = [f'{character}说：“{text}”']
         if self.take_over is True:
             await self.take_over_director.say(f"{character} in the {scenario} just say: {text}. pls reply directly here")
             await self.take_over_director.say(f"last turn dialog: {last_dialog}")

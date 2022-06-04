@@ -4,6 +4,7 @@ https://github.com/guojia60180/sensitive-words-filter
 改写 bigbrother666
 增加了测试代码，来自https://blog.csdn.net/u013421629/article/details/83178970
 更改了返回模式，返回是否检测到和检测到的敏感词(检测到第一个敏感词就返回）
+关键词数据来自：https://github.com/fwwdn/sensitive-stop-words
 '''
 
 class DFAFilter():
