@@ -38,7 +38,7 @@ Version：Pre-release 0.1
 
 然而这部分工作我们还在进行中，预计本月我们会发布第一版《创作手册》，如果您现在就迫不及待想开始创作，可以参考如下架构图并对照项目代码和/editor/examples/下的示例进行尝试。
 
-<img>(asset/aisoul.png)
+<img/>(asset/aisoul.png)
 
 如果您有优秀的创意，也欢迎直接与我联系（weixin：baohukeji）。
 
