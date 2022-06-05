@@ -155,7 +155,7 @@ class Yuan:
                             temperature=self.temperature,
                             topP=self.topP,
                             topK=self.topK)
-        txt = res['resData']
+        txt = res['resData'] if res else "something went wrong with yuan service"
         # 单独针对翻译模型的后处理
         if self.engine == 'translate':
             txt = txt.replace(' ##', '').replace(' "', '"').replace(": ", ":").replace(" ,", ",") \
@@ -169,5 +169,3 @@ class Yuan:
             except:
                 return txt
         return txt
-
-

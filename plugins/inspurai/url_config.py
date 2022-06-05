@@ -44,28 +44,24 @@ def submit_request(query,temperature,topP,topK,max_tokens,engine):
     headers=header_generation()
     url=SUBMIT_URL + "engine={0}&account={1}&data={2}&temperature={3}&topP={4}&topK={5}&tokensToGenerate={6}" \
                      "&type={7}".format(engine,ACCOUNT,query,temperature,topP,topK, max_tokens,"api")
-    #print(url)
+
     response=rest_get(url,headers,30)
-    #print(response)
     response_text = json.loads(response.text)
-    if  response_text["flag"]:
+    if response_text["flag"]:
         requestId = response_text["resData"]
-        # print(requestId)
         return requestId
     else:
-        raise  RuntimeWarning(response_text)
+        raise RuntimeWarning(response_text)
 
 def reply_request(requestId,cycle_count=5):
     """Check reply API to get the inference response."""
     url = REPLY_URL + "account={0}&requestId={1}".format(ACCOUNT, requestId)
-    # print(requestId)
-    headers=header_generation()
+    headers = header_generation()
     for i in range(cycle_count):
         response = rest_get(url, headers, 30, show_error=True)
         response_text = json.loads(response.text)
-        # print(response_text)
         if response_text["resData"] != None:
             return response_text
-        if response_text["flag"] == False and i ==cycle_count-1:
+        if response_text["flag"] == False and i == cycle_count-1:
             raise RuntimeWarning(response_text)
         time.sleep(3)

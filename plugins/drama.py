@@ -425,6 +425,9 @@ class DramaPlugin(WechatyPlugin):
                 if reply is None:
                     self.logger.warning(f'generation failed with the following input:{character},{intent},{action},{text},{scenario}')
                     continue
+                if reply == "somethingwentwrongwithyuanservice":
+                    self.logger.warning(f'Yuan is out of service, failed from:{character},{talker.name},{text},{scenario}')
+                    continue
             await talker.say(reply)
             self.last_turn_memory[talker.contact_id][scenario][character].append(f'你说：“{reply}”')
             replies.append(reply)
